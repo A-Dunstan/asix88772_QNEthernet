@@ -1,0 +1,662 @@
+#include "asix88772.h"
+
+#define USB_CTRLTYPE_VENDOR_IN  (USB_CTRLTYPE_DIR_DEVICE2HOST|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE)
+#define USB_CTRLTYPE_VENDOR_OUT (USB_CTRLTYPE_DIR_HOST2DEVICE|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE)
+
+#define CMD_READ_SRAM                2
+#define CMD_WRITE_SRAM               3
+#define CMD_SOFTWARE_SERIAL_CONTROL  6
+#define CMD_READ_PHY                 7
+#define CMD_WRITE_PHY                8
+#define CMD_READ_SERIAL_STATUS       9
+#define CMD_HARDWARE_SERIAL_CONTROL  10
+#define CMD_READ_SROM                11
+#define CMD_WRITE_SROM               12
+#define CMD_SROM_WRITE_ENABLE        13
+#define CMD_SROM_WRITE_DISABLE       14
+#define CMD_READ_RX_CONTROL          15
+#define CMD_WRITE_RX_CONTROL         16
+#define CMD_READ_IPG                 17
+#define CMD_WRITE_IPG                18
+#define CMD_READ_NODE_ID             19
+#define CMD_WRITE_NODE_ID            20
+#define CMD_READ_MULTICAST_FILTER    21
+#define CMD_WRITE_MULTICAST_FILTER   22
+#define CMD_WRITE_TEST               23
+#define CMD_READ_PHY_ADDRESS         25
+#define CMD_READ_MEDIUM              26
+#define CMD_WRITE_MEDIUM             27
+#define CMD_READ_MONITOR             28
+#define CMD_WRITE_MONITOR            29
+#define CMD_READ_GPIO                30
+#define CMD_WRITE_GPIO               31
+#define CMD_WRITE_SOFTWARE_RESET     32
+#define CMD_READ_PHY_SELECT          33
+#define CMD_WRITE_PHY_SELECT         34
+
+enum {
+  PHY_REG_BMCR = 0,
+  PHY_REG_BMSR,
+  PHY_REG_PHYIDR1,
+  PHY_REG_PHYIDR2,
+  PHY_REG_ANAR,
+  PHY_REG_ANLPAR,
+  PHY_REG_ANER,
+};
+
+#define BMCR_RESET             (1<<15)  // self-clearing
+#define BMCR_LOOPBACK          (1<<14)
+#define BMCR_SPEED_SELECTION   (1<<13)
+#define BMCR_AUTO_NEGOTIATE    (1<<12)
+#define BMCR_POWER_DOWN        (1<<11)
+#define BMCR_ISOLATE           (1<<10)
+#define BMCR_RESTART_AUTO_NEG  (1<<9)   // self-clearing
+#define BMCR_DUPLEX_MODE       (1<<8)
+#define BMCR_COLLISION_TEST    (1<<7)
+
+#define BMSR_100BASE_T4        (1<<15)
+#define BMSR_100BASE_TX_FULL   (1<<14)
+#define BMSR_100BASE_TX_HALF   (1<<13)
+#define BMSR_10BASE_T_FULL     (1<<12)
+#define BMSR_10BASE_T_HALF     (1<<11)
+#define BMSR_MF_PRE_SUPPRESS   (1<<6)
+#define BMSR_AUTO_NEG_COMPLETE (1<<5)
+#define BMSR_REMOTE_FAULT      (1<<4)
+#define BMSR_AUTO_NEG_ABILITY  (1<<3)
+#define BMSR_LINK_STATUS       (1<<2)
+#define BMSR_JABBER_DETECT     (1<<1)
+#define BMSR_EXTENDED_CAP      (1<<0)
+
+#define ANAR_NP                (1<<15)
+#define ANAR_ACK               (1<<14)
+#define ANAR_RF                (1<<13)
+#define ANAR_PAUSE             (1<<10)
+#define ANAR_T4                (1<<9)
+#define ANAR_TX_FD             (1<<8)
+#define ANAR_TX_HD             (1<<7)
+#define ANAR_10_FD             (1<<6)
+#define ANAR_10_HD             (1<<5)
+#define ANAR_SELECTOR_MASK     0x1F
+
+#define ANLPAR_NP              (1<<15)
+#define ANLPAR_ACK             (1<<14)
+#define ANLPAR_RF              (1<<13)
+#define ANLPAR_PAUSE           (1<<10)
+#define ANLPAR_T4              (1<<9)
+#define ANLPAR_TX_FD           (1<<8)
+#define ANLPAR_TX_HD           (1<<7)
+#define ANLPAR_10_FD           (1<<6)
+#define ANLPAR_10_HD           (1<<5)
+#define ANLPAR_SELECTOR_MASK   0x1F
+
+#define MEDIUM_MODE_SM         (1<<12)
+#define MEDIUM_MODE_SBP        (1<<11)
+#define MEDIUM_MODE_PS         (1<<9)
+#define MEDIUM_MODE_RE         (1<<8)
+#define MEDIUM_MODE_PF         (1<<7)
+#define MEDIUM_MODE_TFC        (1<<5)
+#define MEDIUM_MODE_RFC        (1<<4)
+#define MEDIUM_MODE_FD         (1<<1)
+
+enum {
+  EVENT_ATTACH,
+  EVENT_DETACH,
+};
+
+enum {
+  OP_INIT =                    1<<0,
+  OP_SET_MAC =                 1<<1,
+  OP_SET_MULTICAST =           1<<2,
+  OP_UPDATE_MEDIUM =           1<<3,
+  OP_UPDATE_BMCR =             1<<4,
+  OP_UPDATE_BMSR =             1<<5,
+  OP_UPDATE_ANAR =             1<<6,
+  OP_CLEAR_FLE =               1<<7,
+
+  OP_ALL =                     0xFFFFFFFF
+};
+
+void asix88772_eth::interrupt(int result) {
+  if (result < 0) {
+    dprintf("eth status returned %d\n", result);
+    return;
+  }
+
+  if (result > 2) {
+    uint8_t flagsdiff = status[2] ^ last_int;
+    if (flagsdiff & 1) {
+      dprintf("Primary PHY link went %s\n", status[2]&1 ? "UP" : "DOWN");
+      pending_ops |= OP_UPDATE_BMSR;
+    }
+    if (flagsdiff & status[2] & 4) {
+      dprintf("Bulk Out Frame Length Error\n");
+      pending_ops |= OP_CLEAR_FLE;
+    }
+    last_int = status[2];
+#if 0
+    dprintf("eth interrupt: %d bytes ", result);
+    for (int i=0; i < result; i++) {
+      dprintf("%02X ", status[i]);
+    }
+    dprintf("\n");
+#endif
+  }
+
+  InterruptMessage(ep_status, sizeof(status), status, &status_cb);
+}
+
+template <uint8_t cmd>
+bool asix88772_eth::vendor_command() {
+  static_assert(cmd == CMD_SOFTWARE_SERIAL_CONTROL || \
+                cmd == CMD_HARDWARE_SERIAL_CONTROL || \
+                cmd == CMD_SROM_WRITE_ENABLE || \
+                cmd == CMD_SROM_WRITE_DISABLE, \
+                "vendor command requires parameters");
+  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, 0, 0) >= 0;
+}
+
+template <uint8_t cmd>
+bool asix88772_eth::vendor_command(uint16_t wValue) {
+  static_assert(cmd == CMD_WRITE_RX_CONTROL || \
+                cmd == CMD_WRITE_TEST || \
+                cmd == CMD_WRITE_MEDIUM || \
+                cmd == CMD_WRITE_MONITOR || \
+                cmd == CMD_WRITE_GPIO || \
+                cmd == CMD_WRITE_SOFTWARE_RESET || \
+                cmd == CMD_WRITE_PHY_SELECT, \
+                "vendor command does not accept one parameter");
+  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, wValue, 0) >= 0;
+}
+
+template <uint8_t cmd>
+bool asix88772_eth::vendor_command(uint16_t wValue, uint16_t wIndex) {
+  static_assert(cmd == CMD_WRITE_SROM || \
+                cmd == CMD_WRITE_IPG, \
+                "vendor command does not accept two parameters");
+  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, wValue, wIndex) >= 0;
+}
+
+template <uint8_t cmd, typename DT>
+bool asix88772_eth::vendor_command(DT& data) {
+  bool out = cmd==CMD_WRITE_NODE_ID || cmd==CMD_WRITE_MULTICAST_FILTER;
+  uint8_t buf[32] __attribute__((aligned(32)));
+
+  static_assert(cmd == CMD_READ_SERIAL_STATUS || \
+                cmd == CMD_READ_RX_CONTROL || \
+                cmd == CMD_READ_IPG || \
+                cmd == CMD_READ_NODE_ID || \
+                cmd == CMD_READ_MULTICAST_FILTER || \
+                cmd == CMD_READ_PHY_ADDRESS || \
+                cmd == CMD_READ_MEDIUM || \
+                cmd == CMD_READ_MONITOR || \
+                cmd == CMD_READ_GPIO || \
+                cmd == CMD_READ_PHY_SELECT || \
+                cmd == CMD_WRITE_NODE_ID || \
+                cmd == CMD_WRITE_MULTICAST_FILTER, \
+                "vendor command does not read/write data (without arguments)");
+  static_assert(cmd!=CMD_READ_SERIAL_STATUS || sizeof(DT)==1, "read_serial_status returns 1 byte of data");
+  static_assert(cmd!=CMD_READ_RX_CONTROL || sizeof(DT)==2, "read_rx_control returns 2 bytes of data");
+  static_assert(cmd!=CMD_READ_IPG || sizeof(DT)==3, "read_ipg returns 3 bytes of data");
+  static_assert(cmd!=CMD_READ_NODE_ID || sizeof(DT)==6, "read_node_id returns 6 bytes of data");
+  static_assert(cmd!=CMD_READ_MULTICAST_FILTER || sizeof(DT)==8, "read_multicast returns 8 bytes of data");
+  static_assert(cmd!=CMD_READ_PHY_ADDRESS || sizeof(DT)==2, "read_phy_address returns 2 bytes of data");
+  static_assert(cmd!=CMD_READ_MEDIUM || sizeof(DT)==2, "read_medium returns 2 bytes of data");
+  static_assert(cmd!=CMD_READ_MONITOR || sizeof(DT)==1, "read_monitor returns 1 byte of data");
+  static_assert(cmd!=CMD_READ_GPIO || sizeof(DT)==2, "read_gpio returns 1 byte of data");
+  static_assert(cmd!=CMD_READ_PHY_SELECT || sizeof(DT)==1, "read_phy_select returns 1 byte of data");
+  static_assert(cmd!=CMD_WRITE_NODE_ID || sizeof(DT)==6, "write_node_id expects 6 bytes of data");
+  static_assert(cmd!=CMD_WRITE_MULTICAST_FILTER || sizeof(DT)==8, "write_multicast expects 8 bytes of data");
+
+  if (out) memcpy(buf, &data, sizeof(DT));
+  int ret = ControlMessage(out ? USB_CTRLTYPE_VENDOR_OUT : USB_CTRLTYPE_VENDOR_IN, cmd, 0, 0, sizeof(DT), buf);
+  if (ret >= (int)sizeof(DT)) {
+    if (!out) memcpy(&data, buf, sizeof(DT));
+    return true;
+  }
+  return false;
+}
+
+template <uint8_t cmd, typename DT>
+bool asix88772_eth::vendor_command(uint16_t wValue, uint16_t wIndex, DT& data) {
+  bool out = cmd==CMD_WRITE_SRAM || cmd==CMD_WRITE_PHY;
+  uint8_t buf[32] __attribute__((aligned(32)));
+
+  static_assert(cmd == CMD_READ_SRAM || \
+                cmd == CMD_READ_PHY || \
+                cmd == CMD_WRITE_SRAM || \
+                cmd == CMD_WRITE_PHY, \
+                "vendor command does not read/write data with two arguments");
+  static_assert(cmd!=CMD_READ_SRAM || sizeof(DT)==8, "read_sram returns 8 bytes of data");
+  static_assert(cmd!=CMD_WRITE_SRAM || sizeof(DT)==8, "write_sram expects 8 bytes of data");
+  static_assert(cmd!=CMD_READ_PHY || sizeof(DT)==2, "read_PHY returns 2 bytes of data");
+  static_assert(cmd!=CMD_WRITE_PHY || sizeof(DT)==2, "write_PHY expects 2 bytes of data");
+
+  if (out) memcpy(buf, &data, sizeof(DT));
+  int ret = ControlMessage(out ? USB_CTRLTYPE_VENDOR_OUT : USB_CTRLTYPE_VENDOR_IN, cmd, wValue, wIndex, sizeof(DT), buf);
+  if (ret >= (int)sizeof(DT)) {
+    if (!out && !std::is_const_v<DT>) memcpy(&data, buf, sizeof(DT));
+    return true;
+  }
+  return false;
+}
+
+bool asix88772_eth::write_PHY(uint8_t phy_reg, const uint16_t val, bool internal) {
+  bool ret = false;
+  uint8_t phy_address = internal ? PHY_id.internal : PHY_id.external;
+
+  if (vendor_command<CMD_SOFTWARE_SERIAL_CONTROL>()) {
+    ret = vendor_command<CMD_WRITE_PHY>(phy_address, phy_reg, val);
+    if (ret) dprintf("PHY %02X@%02X <- %04X\n", phy_reg, phy_address, val);
+    vendor_command<CMD_HARDWARE_SERIAL_CONTROL>();
+  }
+
+  return ret;
+}
+
+bool asix88772_eth::read_PHY(uint8_t phy_reg, uint16_t& val, bool internal) {
+  bool ret = false;
+  uint8_t phy_address = internal ? PHY_id.internal : PHY_id.external;
+
+  if (vendor_command<CMD_SOFTWARE_SERIAL_CONTROL>()) {
+    ret = vendor_command<CMD_READ_PHY>(phy_address, phy_reg, val);
+    vendor_command<CMD_HARDWARE_SERIAL_CONTROL>();
+  }
+
+  return ret;
+}
+
+bool asix88772_eth::update_medium_mode() {
+  uint16_t m = MEDIUM_MODE_RE|MEDIUM_MODE_TFC|MEDIUM_MODE_RFC|(1<<2);
+  if (bmcr & BMCR_SPEED_SELECTION) m |= MEDIUM_MODE_PS;
+  if (bmcr & BMCR_DUPLEX_MODE) m |= MEDIUM_MODE_FD;
+  dprintf("New Medium Mode: %04X\n", m);
+  if (vendor_command<CMD_WRITE_MEDIUM>(m)) {
+    pending_ops &= ~OP_UPDATE_MEDIUM;
+    return true;
+  }
+
+  return false;
+}
+
+bool asix88772_eth::update_anar() {
+  uint16_t new_anar = anar & 0x05FF;
+  bool ret = write_PHY(PHY_REG_ANAR, new_anar);
+  if (ret) {
+    pending_ops &= ~OP_UPDATE_ANAR;
+    // restart auto-negotiation
+    bmcr |= BMCR_RESTART_AUTO_NEG;
+    pending_ops |= OP_UPDATE_BMCR;
+  }
+  return ret;
+}
+
+bool asix88772_eth::update_bmcr() {
+  bool ret = write_PHY(PHY_REG_BMCR, bmcr);
+  if (ret) {
+    pending_ops &= ~OP_UPDATE_BMCR;
+    if (bmcr & BMCR_RESET) {
+      // will need to update BMCR again - it ignores all other bits when RESET is set
+      bmcr &= ~BMCR_RESET;
+      pending_ops |= OP_UPDATE_BMSR|OP_UPDATE_ANAR|OP_UPDATE_BMCR;
+    }
+    else // else remove other self-clearing bits
+      bmcr &= ~BMCR_RESTART_AUTO_NEG;
+  }
+  return ret;
+}
+
+bool asix88772_eth::update_bmsr() {
+  bool ret = read_PHY(PHY_REG_BMSR, bmsr);
+  if (ret) {
+    pending_ops &= ~OP_UPDATE_BMSR;
+  }
+  return ret;
+}
+
+bool asix88772_eth::set_node_ID() {
+  if (!vendor_command<CMD_WRITE_NODE_ID>(asix_mac.addr))
+    return false;
+
+  dprintf("ASIX new MAC set: %02X:%02X:%02X:%02X:%02X:%02X\n", asix_mac.addr[0], asix_mac.addr[1], asix_mac.addr[2], asix_mac.addr[3], asix_mac.addr[4], asix_mac.addr[5]);
+  pending_ops &= ~OP_SET_MAC;
+  return true;
+}
+
+FLASHMEM bool asix88772_eth::init() {
+  filled_buf f;
+
+  // empty filled queue
+  while (input_filled.Get(f, -1) == ATOM_OK);
+
+  // get chip type
+  if (!vendor_command<CMD_READ_SERIAL_STATUS>(chip_type))
+    return false;
+  chip_type = (chip_type >> 4) & 7;
+  if (chip_type != 0) { // only accept AX88772 base model
+    // 1 = AX88772A
+    // 2 = AX88772B
+    dprintf("AX88772: Bad chip_type(%u), not AX88772 chipset\n", chip_type);
+    return false;
+  }
+
+  // setup GPIOs (GPIO0+1 in, GPIO2 out+on seems to be the default...)
+  if (!vendor_command<CMD_WRITE_GPIO>(0xB0))
+    return false;
+
+  // select internal PHY
+  if (!vendor_command<CMD_WRITE_PHY_SELECT>(1))
+    return false;
+
+  // set power down internal PHY
+  if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(1<<6))
+    return false;
+  delay(20);
+  // clear power down, leave in reset
+  if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0))
+    return false;
+  delay(70);
+  // clear reset of internal PHY / reset external PHY
+  if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>((1<<5)|(1<<3)))
+    return false;
+   delay(150);
+
+  // set medium mode
+  if (!update_medium_mode())
+    return false;
+
+  // write IPG/IPG1/IPG2
+  if (!vendor_command<CMD_WRITE_IPG>((0x0C<<8)|0x15, 0x12))
+    return false;
+
+  // set Node ID
+  if (!set_node_ID())
+    return false;
+
+  // read primary/secondary PHY ids
+  if (!vendor_command<CMD_READ_PHY_ADDRESS>(PHY_id))
+    return false;
+  dprintf("External PHY id %02X, Internal PHY id %02X\n", PHY_id.external, PHY_id.internal);
+
+  // reset PHY
+  if (!write_PHY(PHY_REG_BMCR, BMCR_RESET))
+    return false;
+
+  // update speed/duplex/auto-negotiation
+  if (!update_bmcr())
+    return false;
+
+  // update auto-negotiation advertisement
+  if (!update_anar())
+    return false;
+
+  // read PHY BMSR for capabilities
+  if (!update_bmsr())
+    return false;
+  dprintf("PHY capabilities: %04X\n", bmsr);
+
+  // disable monitor
+  if (!vendor_command<CMD_WRITE_MONITOR>(0))
+    return false;
+
+  // update MAC filter
+  if (!update_mac_filter())
+    return false;
+
+  // queue all input
+  for (auto& p : input_buffers) {
+    submit_read_buffer(p);
+  }
+
+  interrupt(0);
+  pending_ops &= ~OP_INIT;
+  dprintf("AX88772 init complete\n");
+  return true;
+}
+
+bool asix88772_eth::update_mac_filter() {
+  uint16_t rx = 0x88; // default rx control
+  uint8_t filter[8] = {0};
+
+  auto calc_mask = [](mac_addr& mac)-> uint32_t {
+    uint32_t crc = 0xFFFFFFFF;
+
+    for (size_t i=0; i < 6; i++) {
+      crc ^= mac.addr[i];
+      for (int j=0; j < 8; j++)
+        crc = (crc >> 1) ^ (-(crc & 1) & 0xEDB88320);
+    }
+
+    uint32_t rev_crc = 0;
+    for (uint32_t i=0; i < 6; i++) {
+      if (crc & (1 << i))
+        rev_crc |= 0x20 >> i;
+    }
+    return rev_crc;
+  };
+
+
+  for (auto& mac : mac_filter) {
+    if (mac == asix_mac) continue;
+    auto ibit = calc_mask(mac);
+    dprintf("MULTICAST %02X:%02X:%02X:%02X:%02X:%02X %02lX\n", mac.addr[0], mac.addr[1], mac.addr[2], mac.addr[3], mac.addr[4], mac.addr[5], ibit);
+    filter[ibit>>3] |= (1 << (ibit & 7));
+    // set either AM or AP
+    rx |= mac.isMulticast() ? (1<<4):(1<<5);
+  }
+
+  if (!vendor_command<CMD_WRITE_MULTICAST_FILTER>(filter))
+    return false;
+  dprintf("update_mac_filter setting new rx register: %04X\n", rx);
+  if (!vendor_command<CMD_WRITE_RX_CONTROL>(rx))
+    return false;
+
+  pending_ops &= ~OP_SET_MULTICAST;
+  return true;
+}
+
+FLASHMEM USB_Driver* asix88772_eth::offer(const usb_device_descriptor* d, const usb_configuration_descriptor*, const USB_Device*) {
+  if (getDevice() == NULL) {
+    if (d->idVendor == 0x0B95 && d->idProduct == 0x7720)
+      return this;
+  }
+
+  return NULL;
+}
+
+FLASHMEM bool asix88772_eth::attach(const usb_device_descriptor*, const usb_configuration_descriptor* cd) {
+  ep_status = ep_out = ep_in = 0;
+
+  const uint8_t* end = &cd->bLength + cd->wTotalLength;
+  const usb_descriptor* desc = cd;
+  do {
+    desc = desc->next();
+    if (&desc->bLength >= end) return false;
+  } while (desc->bDescriptorType != usb_interface_descriptor::DescriptorType);
+
+  if (desc) {
+    auto id = static_cast<const usb_interface_descriptor*>(desc);
+    for (uint8_t i=0; i < id->bNumEndpoints; i++) {
+      auto ep = get_interface_endpoint(id, i);
+      if (ep == NULL) return false;
+      if (ep->bmAttributes==USB_ENDPOINT_BULK) {
+        if (ep->bEndpointAddress&0x80) {
+          if (ep_in==0) ep_in = ep->bEndpointAddress;
+        } else if (ep_out==0)
+          ep_out = ep->bEndpointAddress;
+      } else if (ep->bmAttributes==USB_ENDPOINT_INTERRUPT) {
+        if (ep->bEndpointAddress&0x80 && ep->wMaxPacketSize==8 && ep_status==0)
+          ep_status = ep->bEndpointAddress;
+      }
+
+      if (ep_status && ep_in && ep_out) {
+        dprintf("ASIX 88772: INT %02X IN %02X OUT %02X\n", ep_status, ep_in, ep_out);
+        evt.triggerEvent(EVENT_ATTACH);
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+FLASHMEM void asix88772_eth::detach(void) {
+  dprintf("ASIX88772 DETACH\n");
+  evt.triggerEvent(EVENT_DETACH);
+}
+
+FLASHMEM asix88772_eth::asix88772_eth() {
+  auto mac1 = HW_OCOTP_MAC1;
+  auto mac0 = HW_OCOTP_MAC0;
+  asix_mac.addr[0] = mac1 >> 8;
+  asix_mac.addr[1] = mac1 >> 0;
+  asix_mac.addr[2] = mac0 >> 24;
+  asix_mac.addr[3] = mac0 >> 16;
+  asix_mac.addr[4] = mac0 >> 8;
+  asix_mac.addr[5] = mac0 >> 0;
+
+  bmcr = BMCR_SPEED_SELECTION|BMCR_AUTO_NEGOTIATE|BMCR_DUPLEX_MODE;
+  bmsr = 0;
+  anar = ANAR_PAUSE|ANAR_TX_FD|ANAR_TX_HD|ANAR_10_FD|ANAR_10_HD|(1 & ANAR_SELECTOR_MASK);
+  pending_ops = OP_ALL;
+
+  evt.setContext(this);
+  evt.attach(Event);
+}
+
+bool asix88772_eth::get_mac(uint8_t* mac) {
+  dprintf("ASIX return mac: %02X:%02X:%02X:%02X:%02X:%02X\n", asix_mac.addr[0], asix_mac.addr[1], asix_mac.addr[2], asix_mac.addr[3], asix_mac.addr[4], asix_mac.addr[5]);
+  memcpy(mac, asix_mac.addr, 6);
+  return true;
+}
+
+bool asix88772_eth::set_mac(const mac_addr mac) {
+  asix_mac = mac;
+  pending_ops |= OP_SET_MAC;
+
+  return true;
+}
+
+bool asix88772_eth::filter_address(const mac_addr mac, const bool allow) {
+  bool removed = false;
+
+  for (auto addr = mac_filter.begin(); addr != mac_filter.end(); addr++) {
+    if (*addr == mac) {
+      if (allow) {
+        // mac is already in the list
+        return true;
+      }
+      mac_filter.erase(addr);
+      removed = true;
+      break;
+    }
+  }
+
+  if (allow) mac_filter.push_back(mac);
+  if (allow || removed) pending_ops |= OP_SET_MULTICAST;
+
+  return true;
+}
+
+void asix88772_eth::restart_auto_negotiation() {
+  bmcr |= BMCR_RESTART_AUTO_NEG;
+  pending_ops |= OP_UPDATE_BMCR;
+}
+
+void asix88772_eth::reset_phy() {
+  bmcr |= BMCR_RESET;
+  pending_ops |= OP_UPDATE_BMCR|OP_UPDATE_BMSR|OP_UPDATE_ANAR;
+}
+
+bool asix88772_eth::clear_FLE() {
+  if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0x2B))
+    return false;
+  if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0x28))
+    return false;
+  dprintf("FLE was cleared\n");
+  pending_ops &= ~OP_CLEAR_FLE;
+  return true;
+}
+
+bool asix88772_eth::loop() {
+  if (pending_ops & OP_INIT)
+    return false;
+
+  if (pending_ops & OP_CLEAR_FLE && !clear_FLE())
+    return false;
+  if (pending_ops & OP_SET_MAC && !set_node_ID())
+    return false;
+  if (pending_ops & OP_SET_MULTICAST && !update_mac_filter())
+    return false;
+  if (pending_ops & OP_UPDATE_MEDIUM && !update_medium_mode())
+    return false;
+  if (pending_ops & OP_UPDATE_BMCR && !update_bmcr())
+    return false;
+  if (pending_ops & OP_UPDATE_ANAR && !update_anar())
+    return false;
+  auto old_bmsr = bmsr;
+  if (pending_ops & OP_UPDATE_BMSR && !update_bmsr())
+    return false;
+
+  if (!(old_bmsr & BMSR_LINK_STATUS) && (bmsr & BMSR_LINK_STATUS)) {
+    uint16_t anlpar;
+    if (read_PHY(PHY_REG_ANLPAR, anlpar)) {
+      dprintf("BMSR: %04X, ANLPAR: %04X\n", bmsr, anlpar);
+    } else
+      dprintf("Failed to read ANLPAR\n");
+  }
+
+  return bmsr & BMSR_LINK_STATUS;
+}
+
+void asix88772_eth::Event(EventResponderRef evt) {
+  auto p = (asix88772_eth*)evt.getContext();
+  switch (evt.getStatus()) {
+    case EVENT_ATTACH:
+      p->last_int = 0;
+      p->pending_ops |= OP_ALL;
+      p->init();
+      break;
+    case EVENT_DETACH:
+      p->pending_ops = OP_INIT;
+      break;
+    default:
+      dprintf("Unhandled event code: %d\n", evt.getStatus());
+  }
+}
+
+void asix88772_eth::bulk_in(int r, struct read_buffer* pbuf) {
+#if 0
+  if (r >= 16) {
+    uint16_t len = (pbuf->data[1] << 8) | pbuf->data[0];
+    uint16_t nlen = (pbuf->data[3] << 8) | pbuf->data[2];
+    dprintf("BULK_IN: %d/%04X bytes, len %04X nlen %04X (%s)\n", r, r-4, len, nlen, len^0xFFFF^nlen ? "BAD" : "OK");
+    dprintf("DST MAC: %02X:%02X:%02X:%02X:%02X:%02X\t", pbuf->data[4], pbuf->data[5], pbuf->data[6], pbuf->data[7], pbuf->data[8], pbuf->data[9]);
+    dprintf("SRC MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", pbuf->data[10], pbuf->data[11], pbuf->data[12], pbuf->data[13], pbuf->data[14], pbuf->data[15]);
+  }
+#endif
+  filled_buf f = {pbuf, r > 0 ? (size_t)r : 0};
+  input_filled.Put(f, -1);
+}
+
+bool asix88772_eth::submit_read_buffer(read_buffer& buf) {
+  int ret = BulkMessage(ep_in, sizeof(buf.data), buf.data, [=, pbuf=&buf](int r) {
+    bulk_in(r, pbuf);
+  });
+//  dprintf("submit_read_buffer %p %d\n", &buf, ret);
+  return ret >= 0;
+}
+
+bool asix88772_eth::get_read(read_buffer*& buf, size_t& len) {
+  filled_buf f;
+  if (input_filled.Get(f, -1) == ATOM_OK) {
+    buf = f.buf;
+    len = f.length;
+    return true;
+  }
+  return false;
+}
+
+bool asix88772_eth::output_frame(const void* frame, size_t len) {
+  int ret = BulkMessage(ep_out, len, frame);
+  return (ret >= 0 && (size_t)ret >= len);
+}
