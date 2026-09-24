@@ -35,11 +35,14 @@ private:
   uint16_t bmsr;
   uint16_t anar;
 
-  struct {
-    uint8_t external:5;
-    uint8_t external_type:3;
-    uint8_t internal:5;
-    uint8_t internal_type:3;
+  union {
+    struct {
+      uint8_t external:5;
+      uint8_t external_type:3;
+      uint8_t internal:5;
+      uint8_t internal_type:3;
+    };
+    uint16_t val;
   } PHY_id;
 
   uint8_t ep_status;
@@ -48,11 +51,12 @@ private:
   volatile uint32_t pending_ops;
   uint8_t last_int;
 
-  template <uint8_t> bool vendor_command(void);
-  template <uint8_t> bool vendor_command(uint16_t wValue);
-  template <uint8_t> bool vendor_command(uint16_t wValue, uint16_t wIndex);
-  template <uint8_t, typename T> bool vendor_command(T& data);
-  template <uint8_t, typename T> bool vendor_command(uint16_t wValue, uint16_t wIndex, T& data);
+  bool vendor_command(uint8_t,uint16_t,uint16_t,uint16_t,void*);
+  bool vendor_command(uint8_t,uint16_t,uint16_t,uint16_t,const void*);
+
+  // template to ensure amount/type of arguments matches the command type
+  template <uint8_t cmd, typename...Args>
+  bool vendor_command(Args...);
 
   void interrupt(int);
   const USBCallback status_cb = [=](int r) { interrupt(r); };

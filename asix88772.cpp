@@ -1,39 +1,5 @@
 #include "asix88772.h"
 
-#define USB_CTRLTYPE_VENDOR_IN  (USB_CTRLTYPE_DIR_DEVICE2HOST|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE)
-#define USB_CTRLTYPE_VENDOR_OUT (USB_CTRLTYPE_DIR_HOST2DEVICE|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE)
-
-#define CMD_READ_SRAM                2
-#define CMD_WRITE_SRAM               3
-#define CMD_SOFTWARE_SERIAL_CONTROL  6
-#define CMD_READ_PHY                 7
-#define CMD_WRITE_PHY                8
-#define CMD_READ_SERIAL_STATUS       9
-#define CMD_HARDWARE_SERIAL_CONTROL  10
-#define CMD_READ_SROM                11
-#define CMD_WRITE_SROM               12
-#define CMD_SROM_WRITE_ENABLE        13
-#define CMD_SROM_WRITE_DISABLE       14
-#define CMD_READ_RX_CONTROL          15
-#define CMD_WRITE_RX_CONTROL         16
-#define CMD_READ_IPG                 17
-#define CMD_WRITE_IPG                18
-#define CMD_READ_NODE_ID             19
-#define CMD_WRITE_NODE_ID            20
-#define CMD_READ_MULTICAST_FILTER    21
-#define CMD_WRITE_MULTICAST_FILTER   22
-#define CMD_WRITE_TEST               23
-#define CMD_READ_PHY_ADDRESS         25
-#define CMD_READ_MEDIUM              26
-#define CMD_WRITE_MEDIUM             27
-#define CMD_READ_MONITOR             28
-#define CMD_WRITE_MONITOR            29
-#define CMD_READ_GPIO                30
-#define CMD_WRITE_GPIO               31
-#define CMD_WRITE_SOFTWARE_RESET     32
-#define CMD_READ_PHY_SELECT          33
-#define CMD_WRITE_PHY_SELECT         34
-
 enum {
   PHY_REG_BMCR = 0,
   PHY_REG_BMSR,
@@ -145,99 +111,153 @@ void asix88772_eth::interrupt(int result) {
   InterruptMessage(ep_status, sizeof(status), status, &status_cb);
 }
 
-template <uint8_t cmd>
-bool asix88772_eth::vendor_command() {
-  static_assert(cmd == CMD_SOFTWARE_SERIAL_CONTROL || \
-                cmd == CMD_HARDWARE_SERIAL_CONTROL || \
-                cmd == CMD_SROM_WRITE_ENABLE || \
-                cmd == CMD_SROM_WRITE_DISABLE, \
-                "vendor command requires parameters");
-  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, 0, 0) >= 0;
-}
+typedef std::tuple<uint16_t,uint16_t,uint16_t,void*> ReadControlArgs;
+typedef std::tuple<uint16_t,uint16_t,uint16_t,const void*> WriteControlArgs;
+template<uint8_t> struct make_cmd_args;
 
-template <uint8_t cmd>
-bool asix88772_eth::vendor_command(uint16_t wValue) {
-  static_assert(cmd == CMD_WRITE_RX_CONTROL || \
-                cmd == CMD_WRITE_TEST || \
-                cmd == CMD_WRITE_MEDIUM || \
-                cmd == CMD_WRITE_MONITOR || \
-                cmd == CMD_WRITE_GPIO || \
-                cmd == CMD_WRITE_SOFTWARE_RESET || \
-                cmd == CMD_WRITE_PHY_SELECT, \
-                "vendor command does not accept one parameter");
-  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, wValue, 0) >= 0;
-}
+#define CMD_READ_SRAM                2
+#define CMD_WRITE_SRAM               3
+#define CMD_SOFTWARE_SERIAL_CONTROL  6
+#define CMD_READ_PHY                 7
+#define CMD_WRITE_PHY                8
+#define CMD_READ_SERIAL_STATUS       9
+#define CMD_HARDWARE_SERIAL_CONTROL  10
+#define CMD_READ_SROM                11
+#define CMD_WRITE_SROM               12
+#define CMD_SROM_WRITE_ENABLE        13
+#define CMD_SROM_WRITE_DISABLE       14
+#define CMD_READ_RX_CONTROL          15
+#define CMD_WRITE_RX_CONTROL         16
+#define CMD_READ_IPG                 17
+#define CMD_WRITE_IPG                18
+#define CMD_READ_NODE_ID             19
+#define CMD_WRITE_NODE_ID            20
+#define CMD_READ_MULTICAST_FILTER    21
+#define CMD_WRITE_MULTICAST_FILTER   22
+#define CMD_WRITE_TEST               23
+#define CMD_READ_PHY_ADDRESS         25
+#define CMD_READ_MEDIUM              26
+#define CMD_WRITE_MEDIUM             27
+#define CMD_READ_MONITOR             28
+#define CMD_WRITE_MONITOR            29
+#define CMD_READ_GPIO                30
+#define CMD_WRITE_GPIO               31
+#define CMD_WRITE_SOFTWARE_RESET     32
+#define CMD_READ_PHY_SELECT          33
+#define CMD_WRITE_PHY_SELECT         34
 
-template <uint8_t cmd>
-bool asix88772_eth::vendor_command(uint16_t wValue, uint16_t wIndex) {
-  static_assert(cmd == CMD_WRITE_SROM || \
-                cmd == CMD_WRITE_IPG, \
-                "vendor command does not accept two parameters");
-  return ControlMessage(USB_CTRLTYPE_VENDOR_OUT, cmd, wValue, wIndex) >= 0;
-}
+// tx_sram==1 means access tx_sram, else access rx_sram
+template<> struct make_cmd_args<CMD_READ_SRAM> {
+  static auto pack(uint16_t address, bool tx_sram, void* dst) { return ReadControlArgs(address, tx_sram, 8, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_SRAM> {
+  static auto pack(uint16_t address, bool tx_sram, const void* src) { return WriteControlArgs(address, tx_sram, 8, src); }
+};
+template<> struct make_cmd_args<CMD_SOFTWARE_SERIAL_CONTROL> {
+  static auto pack(void) { return WriteControlArgs(0, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_PHY> {
+  static auto pack(uint8_t phy_id, uint8_t reg_addr, uint16_t* dst) { return ReadControlArgs(phy_id, reg_addr, 2, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_PHY> {
+  static auto pack(uint8_t phy_id, uint8_t reg_addr, const uint16_t* src) { return WriteControlArgs(phy_id, reg_addr, 2, src); }
+};
+template<> struct make_cmd_args<CMD_READ_SERIAL_STATUS> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 1, dst); }
+};
+template<> struct make_cmd_args<CMD_HARDWARE_SERIAL_CONTROL> {
+  static auto pack(void) { return WriteControlArgs(0, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_SROM> {
+  static auto pack(uint8_t address, uint16_t* dst) { return ReadControlArgs(address, 0, 2, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_SROM> {
+  static auto pack(uint8_t address, uint16_t val) { return WriteControlArgs(address, val, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_SROM_WRITE_ENABLE> {
+  static auto pack(void) { return WriteControlArgs(0, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_SROM_WRITE_DISABLE> {
+  static auto pack(void) { return WriteControlArgs(0, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_RX_CONTROL> {
+  static auto pack(uint16_t* dst) { return ReadControlArgs(0, 0, 2, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_RX_CONTROL> {
+  static auto pack(uint16_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_IPG> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 3, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_IPG> {
+  static auto pack(uint8_t val1, uint8_t val2, uint8_t val3) { return WriteControlArgs((val2<<8)|val1, val3, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_NODE_ID> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 6, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_NODE_ID> {
+  static auto pack(const uint8_t* src) { return WriteControlArgs(0, 0, 6, src); }
+};
+template<> struct make_cmd_args<CMD_READ_MULTICAST_FILTER> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 8, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_MULTICAST_FILTER> {
+  static auto pack(const uint8_t* src) { return WriteControlArgs(0, 0, 8, src); }
+};
+template<> struct make_cmd_args<CMD_WRITE_TEST> {
+  static auto pack(uint16_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_PHY_ADDRESS> {
+  static auto pack(uint16_t* dst) { return ReadControlArgs(0, 0, 2, dst); }
+};
+template<> struct make_cmd_args<CMD_READ_MEDIUM> {
+  static auto pack(uint16_t* dst) { return ReadControlArgs(0, 0, 2, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_MEDIUM> {
+  static auto pack(uint16_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_MONITOR> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 1, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_MONITOR> {
+  static auto pack(uint8_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_GPIO> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 1, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_GPIO> {
+  static auto pack(uint8_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_WRITE_SOFTWARE_RESET> {
+  static auto pack(uint8_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
+template<> struct make_cmd_args<CMD_READ_PHY_SELECT> {
+  static auto pack(uint8_t* dst) { return ReadControlArgs(0, 0, 1, dst); }
+};
+template<> struct make_cmd_args<CMD_WRITE_PHY_SELECT> {
+  static auto pack(uint8_t val) { return WriteControlArgs(val, 0, 0, NULL); }
+};
 
-template <uint8_t cmd, typename DT>
-bool asix88772_eth::vendor_command(DT& data) {
-  bool out = cmd==CMD_WRITE_NODE_ID || cmd==CMD_WRITE_MULTICAST_FILTER;
+// vendor command INPUT
+bool asix88772_eth::vendor_command(uint8_t bmr, uint16_t wValue, uint16_t wIndex ,uint16_t wLength, void* data) {
   uint8_t buf[32] __attribute__((aligned(32)));
 
-  static_assert(cmd == CMD_READ_SERIAL_STATUS || \
-                cmd == CMD_READ_RX_CONTROL || \
-                cmd == CMD_READ_IPG || \
-                cmd == CMD_READ_NODE_ID || \
-                cmd == CMD_READ_MULTICAST_FILTER || \
-                cmd == CMD_READ_PHY_ADDRESS || \
-                cmd == CMD_READ_MEDIUM || \
-                cmd == CMD_READ_MONITOR || \
-                cmd == CMD_READ_GPIO || \
-                cmd == CMD_READ_PHY_SELECT || \
-                cmd == CMD_WRITE_NODE_ID || \
-                cmd == CMD_WRITE_MULTICAST_FILTER, \
-                "vendor command does not read/write data (without arguments)");
-  static_assert(cmd!=CMD_READ_SERIAL_STATUS || sizeof(DT)==1, "read_serial_status returns 1 byte of data");
-  static_assert(cmd!=CMD_READ_RX_CONTROL || sizeof(DT)==2, "read_rx_control returns 2 bytes of data");
-  static_assert(cmd!=CMD_READ_IPG || sizeof(DT)==3, "read_ipg returns 3 bytes of data");
-  static_assert(cmd!=CMD_READ_NODE_ID || sizeof(DT)==6, "read_node_id returns 6 bytes of data");
-  static_assert(cmd!=CMD_READ_MULTICAST_FILTER || sizeof(DT)==8, "read_multicast returns 8 bytes of data");
-  static_assert(cmd!=CMD_READ_PHY_ADDRESS || sizeof(DT)==2, "read_phy_address returns 2 bytes of data");
-  static_assert(cmd!=CMD_READ_MEDIUM || sizeof(DT)==2, "read_medium returns 2 bytes of data");
-  static_assert(cmd!=CMD_READ_MONITOR || sizeof(DT)==1, "read_monitor returns 1 byte of data");
-  static_assert(cmd!=CMD_READ_GPIO || sizeof(DT)==2, "read_gpio returns 1 byte of data");
-  static_assert(cmd!=CMD_READ_PHY_SELECT || sizeof(DT)==1, "read_phy_select returns 1 byte of data");
-  static_assert(cmd!=CMD_WRITE_NODE_ID || sizeof(DT)==6, "write_node_id expects 6 bytes of data");
-  static_assert(cmd!=CMD_WRITE_MULTICAST_FILTER || sizeof(DT)==8, "write_multicast expects 8 bytes of data");
+  int ret = ControlMessage(USB_CTRLTYPE_DIR_DEVICE2HOST|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE, bmr, wValue, wIndex, wLength, buf);
+  if (ret >= 0) memcpy(data, buf, ret);
 
-  if (out) memcpy(buf, &data, sizeof(DT));
-  int ret = ControlMessage(out ? USB_CTRLTYPE_VENDOR_OUT : USB_CTRLTYPE_VENDOR_IN, cmd, 0, 0, sizeof(DT), buf);
-  if (ret >= (int)sizeof(DT)) {
-    if (!out) memcpy(&data, buf, sizeof(DT));
-    return true;
-  }
-  return false;
+  return ret >= wLength;
+}
+// vendor command OUTPUT
+bool asix88772_eth::vendor_command(uint8_t bmr, uint16_t wValue, uint16_t wIndex, uint16_t wLength, const void* data) {
+  return ControlMessage(USB_CTRLTYPE_DIR_HOST2DEVICE|USB_CTRLTYPE_TYPE_VENDOR|USB_CTRLTYPE_REC_DEVICE, bmr, wValue, wIndex, wLength, data) >= wLength;
 }
 
-template <uint8_t cmd, typename DT>
-bool asix88772_eth::vendor_command(uint16_t wValue, uint16_t wIndex, DT& data) {
-  bool out = cmd==CMD_WRITE_SRAM || cmd==CMD_WRITE_PHY;
-  uint8_t buf[32] __attribute__((aligned(32)));
+template<uint8_t cmd, typename...Args>
+bool asix88772_eth::vendor_command(Args...r) {
+  auto fn = [&](auto...cmargs) { return vendor_command(cmd, cmargs...); };
+  auto params = make_cmd_args<cmd>::pack(r...);
 
-  static_assert(cmd == CMD_READ_SRAM || \
-                cmd == CMD_READ_PHY || \
-                cmd == CMD_WRITE_SRAM || \
-                cmd == CMD_WRITE_PHY, \
-                "vendor command does not read/write data with two arguments");
-  static_assert(cmd!=CMD_READ_SRAM || sizeof(DT)==8, "read_sram returns 8 bytes of data");
-  static_assert(cmd!=CMD_WRITE_SRAM || sizeof(DT)==8, "write_sram expects 8 bytes of data");
-  static_assert(cmd!=CMD_READ_PHY || sizeof(DT)==2, "read_PHY returns 2 bytes of data");
-  static_assert(cmd!=CMD_WRITE_PHY || sizeof(DT)==2, "write_PHY expects 2 bytes of data");
-
-  if (out) memcpy(buf, &data, sizeof(DT));
-  int ret = ControlMessage(out ? USB_CTRLTYPE_VENDOR_OUT : USB_CTRLTYPE_VENDOR_IN, cmd, wValue, wIndex, sizeof(DT), buf);
-  if (ret >= (int)sizeof(DT)) {
-    if (!out && !std::is_const_v<DT>) memcpy(&data, buf, sizeof(DT));
-    return true;
-  }
-  return false;
+  return std::apply(fn, params);
 }
 
 bool asix88772_eth::write_PHY(uint8_t phy_reg, const uint16_t val, bool internal) {
@@ -245,7 +265,7 @@ bool asix88772_eth::write_PHY(uint8_t phy_reg, const uint16_t val, bool internal
   uint8_t phy_address = internal ? PHY_id.internal : PHY_id.external;
 
   if (vendor_command<CMD_SOFTWARE_SERIAL_CONTROL>()) {
-    ret = vendor_command<CMD_WRITE_PHY>(phy_address, phy_reg, val);
+    ret = vendor_command<CMD_WRITE_PHY>(phy_address, phy_reg, &val);
     if (ret) dprintf("PHY %02X@%02X <- %04X\n", phy_reg, phy_address, val);
     vendor_command<CMD_HARDWARE_SERIAL_CONTROL>();
   }
@@ -258,7 +278,7 @@ bool asix88772_eth::read_PHY(uint8_t phy_reg, uint16_t& val, bool internal) {
   uint8_t phy_address = internal ? PHY_id.internal : PHY_id.external;
 
   if (vendor_command<CMD_SOFTWARE_SERIAL_CONTROL>()) {
-    ret = vendor_command<CMD_READ_PHY>(phy_address, phy_reg, val);
+    ret = vendor_command<CMD_READ_PHY>(phy_address, phy_reg, &val);
     vendor_command<CMD_HARDWARE_SERIAL_CONTROL>();
   }
 
@@ -329,7 +349,7 @@ FLASHMEM bool asix88772_eth::init() {
   while (input_filled.Get(f, -1) == ATOM_OK);
 
   // get chip type
-  if (!vendor_command<CMD_READ_SERIAL_STATUS>(chip_type))
+  if (!vendor_command<CMD_READ_SERIAL_STATUS>(&chip_type))
     return false;
   chip_type = (chip_type >> 4) & 7;
   if (chip_type != 0) { // only accept AX88772 base model
@@ -365,7 +385,7 @@ FLASHMEM bool asix88772_eth::init() {
     return false;
 
   // write IPG/IPG1/IPG2
-  if (!vendor_command<CMD_WRITE_IPG>((0x0C<<8)|0x15, 0x12))
+  if (!vendor_command<CMD_WRITE_IPG>(0x15,0x0C,0x12))
     return false;
 
   // set Node ID
@@ -373,7 +393,7 @@ FLASHMEM bool asix88772_eth::init() {
     return false;
 
   // read primary/secondary PHY ids
-  if (!vendor_command<CMD_READ_PHY_ADDRESS>(PHY_id))
+  if (!vendor_command<CMD_READ_PHY_ADDRESS>(&PHY_id.val))
     return false;
   dprintf("External PHY id %02X, Internal PHY id %02X\n", PHY_id.external, PHY_id.internal);
 
