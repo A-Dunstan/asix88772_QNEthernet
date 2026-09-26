@@ -434,34 +434,30 @@ FLASHMEM bool asix88772_eth::init() {
 }
 
 bool asix88772_eth::update_mac_filter() {
-  uint16_t rx = 0x88; // default rx control
+  uint16_t rx = 0x88; // default rx control: start operation + receive broadcast frames
   uint8_t filter[8] = {0};
 
   auto calc_mask = [](mac_addr& mac)-> uint32_t {
     uint32_t crc = 0xFFFFFFFF;
 
-    for (size_t i=0; i < 6; i++) {
-      crc ^= mac.addr[i];
-      for (int j=0; j < 8; j++)
-        crc = (crc >> 1) ^ (-(crc & 1) & 0xEDB88320);
+    for (uint32_t i : mac.addr) {
+      crc ^= __builtin_arm_rbit(i);
+      // compiler will completely unroll this loop if optimizations are on
+      for (int j=0; j<8; j++) {
+        crc = (crc<<1) ^ (crc & 0x80000000 ? 0x04C11DB7 : 0);
+      }
     }
 
-    uint32_t rev_crc = 0;
-    for (uint32_t i=0; i < 6; i++) {
-      if (crc & (1 << i))
-        rev_crc |= 0x20 >> i;
-    }
-    return rev_crc;
+    return crc >> 26;
   };
 
-
   for (auto& mac : mac_filter) {
-    if (mac == asix_mac) continue;
+    if (mac == asix_mac) continue; // ignore our own mac
     auto ibit = calc_mask(mac);
-    dprintf("MULTICAST %02X:%02X:%02X:%02X:%02X:%02X %02lX\n", mac.addr[0], mac.addr[1], mac.addr[2], mac.addr[3], mac.addr[4], mac.addr[5], ibit);
+    dprintf("MULTICAST HASH %02X:%02X:%02X:%02X:%02X:%02X %02lX\n", mac.addr[0], mac.addr[1], mac.addr[2], mac.addr[3], mac.addr[4], mac.addr[5], ibit);
     filter[ibit>>3] |= (1 << (ibit & 7));
-    // set either AM or AP
-    rx |= mac.isMulticast() ? (1<<4):(1<<5);
+    if (mac.isMulticast()) rx |= 1<<4; // receive any multicast frames that match filter
+    else rx |= 1<<5;                   // receive any unicast frames that match filter
   }
 
   if (!vendor_command<CMD_WRITE_MULTICAST_FILTER>(filter))
