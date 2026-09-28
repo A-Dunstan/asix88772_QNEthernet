@@ -101,8 +101,6 @@ bool is_unknown() {
   return false;
 }
 
-extern "C" void qnethernet_hal_get_system_mac_address(uint8_t mac[ETH_HWADDR_LEN]);
-
 void get_system_mac(uint8_t mac[ETH_HWADDR_LEN]) {
   asix88772().get_mac(mac);
 }
@@ -277,12 +275,10 @@ void notify_manual_link_state(const bool state) {
 }
 
 void restart_auto_negotiation() {
-  dprintf("RESTART_AUTO_NEGOTIATION\n");
   asix88772().restart_auto_negotiation();
 }
 
 void reset_phy() {
-  dprintf("RESET_PHY\n");
   asix88772().reset_phy();
 }
 

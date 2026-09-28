@@ -45,7 +45,6 @@ enum {
 #define ANAR_10_HD             (1<<5)
 #define ANAR_SELECTOR_MASK     0x1F
 
-
 #define MEDIUM_MODE_SM         (1<<12)
 #define MEDIUM_MODE_SBP        (1<<11)
 #define MEDIUM_MODE_PS         (1<<9)
@@ -70,7 +69,7 @@ enum {
 
 void asix88772_eth::interrupt(int result) {
   if (result < 0) {
-    dprintf("eth status returned %d\n", result);
+    //dprintf("eth status returned %d\n", result);
     return;
   }
 
@@ -83,7 +82,7 @@ void asix88772_eth::interrupt(int result) {
       });
     }
     if (flagsdiff & status[2] & 4) {
-      dprintf("Bulk Out Frame Length Error\n");
+      // bad data sent to bulk out endpoint (frame length error)
       pending_ops |= OP_CLEAR_FLE;
     }
     last_int = status[2];
@@ -254,7 +253,6 @@ bool asix88772_eth::write_PHY(uint8_t phy_reg, const uint16_t val, bool internal
 
   if (vendor_command<CMD_SOFTWARE_SERIAL_CONTROL>()) {
     ret = vendor_command<CMD_WRITE_PHY>(phy_address, phy_reg, &val);
-    if (ret) dprintf("PHY %02X@%02X <- %04X\n", phy_reg, phy_address, val);
     vendor_command<CMD_HARDWARE_SERIAL_CONTROL>();
   }
 
@@ -361,7 +359,6 @@ bool asix88772_eth::set_node_ID() {
   if (!vendor_command<CMD_WRITE_NODE_ID>(asix_mac.addr))
     return false;
 
-  dprintf("ASIX new MAC set: %02X:%02X:%02X:%02X:%02X:%02X\n", asix_mac.addr[0], asix_mac.addr[1], asix_mac.addr[2], asix_mac.addr[3], asix_mac.addr[4], asix_mac.addr[5]);
   pending_ops &= ~OP_SET_MAC;
   return true;
 }
@@ -397,7 +394,7 @@ FLASHMEM bool asix88772_eth::init() {
   if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0))
     return false;
   delay(70);
-  // clear reset of internal PHY / reset external PHY
+  // clear reset of internal PHY / hold external PHY in reset
   if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>((1<<5)|(1<<3)))
     return false;
    delay(150);
@@ -413,7 +410,7 @@ FLASHMEM bool asix88772_eth::init() {
   // read primary/secondary PHY ids
   if (!vendor_command<CMD_READ_PHY_ADDRESS>(&PHY_id.val))
     return false;
-  dprintf("External PHY id %02X, Internal PHY id %02X\n", PHY_id.external, PHY_id.internal);
+  //dprintf("External PHY id %02X, Internal PHY id %02X\n", PHY_id.external, PHY_id.internal);
 
   // reset PHY
   if (!write_PHY(PHY_REG_BMCR, BMCR_RESET))
@@ -427,10 +424,9 @@ FLASHMEM bool asix88772_eth::init() {
   if (!update_anar())
     return false;
 
-  // read PHY BMSR for capabilities
+  // read PHY BMSR for status
   if (!update_bmsr())
     return false;
-  dprintf("PHY capabilities: %04X\n", bmsr);
 
   // set medium mode (interrupt polling won't work if RX path is not enabled)
   if (!update_medium_mode())
@@ -446,7 +442,6 @@ FLASHMEM bool asix88772_eth::init() {
 
   interrupt(0);
   pending_ops &= ~OP_INIT;
-  dprintf("AX88772 init complete\n");
   return true;
 }
 
@@ -471,7 +466,7 @@ bool asix88772_eth::update_mac_filter() {
   for (auto& mac : mac_filter) {
     if (mac == asix_mac) continue; // ignore our own mac
     auto ibit = calc_mask(mac);
-    dprintf("MULTICAST HASH %02X:%02X:%02X:%02X:%02X:%02X %02lX\n", mac.addr[0], mac.addr[1], mac.addr[2], mac.addr[3], mac.addr[4], mac.addr[5], ibit);
+    //dprintf("MULTICAST HASH %02X:%02X:%02X:%02X:%02X:%02X %02lX\n", mac.addr[0], mac.addr[1], mac.addr[2], mac.addr[3], mac.addr[4], mac.addr[5], ibit);
     filter[ibit>>3] |= (1 << (ibit & 7));
     if (mac.isMulticast()) rx |= 1<<4; // receive any multicast frames that match filter
     else rx |= 1<<5;                   // receive any unicast frames that match filter
@@ -564,12 +559,12 @@ FLASHMEM asix88772_eth::asix88772_eth(bool autoNegotiate, bool speed, bool duple
   set100mbps(speed);
   setFullDuplex(duplex);
   setAutoNegotiation(autoNegotiate);
+
   evt.setContext(this);
   evt.attach(Event);
 }
 
 bool asix88772_eth::get_mac(uint8_t* mac) {
-  dprintf("ASIX return mac: %02X:%02X:%02X:%02X:%02X:%02X\n", asix_mac.addr[0], asix_mac.addr[1], asix_mac.addr[2], asix_mac.addr[3], asix_mac.addr[4], asix_mac.addr[5]);
   memcpy(mac, asix_mac.addr, 6);
   return true;
 }
@@ -607,7 +602,6 @@ bool asix88772_eth::clear_FLE() {
     return false;
   if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0x28))
     return false;
-  dprintf("FLE was cleared\n");
   pending_ops &= ~OP_CLEAR_FLE;
   return true;
 }
@@ -704,7 +698,9 @@ bool asix88772_eth::get_read(read_buffer*& buf, size_t& len) {
 
 bool asix88772_eth::output_frame(const void* frame, size_t len) {
   int ret = BulkMessage(ep_out, len, frame);
-  return (ret >= 0 && (size_t)ret >= len);
+  return ret >= 0 && (size_t)ret >= len;
+}
+
 void asix88772_eth::restart_auto_negotiation() {
   bmcr |= BMCR_RESTART_AUTO_NEG;
   pending_ops |= OP_UPDATE_BMCR;

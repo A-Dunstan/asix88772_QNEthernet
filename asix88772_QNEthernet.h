@@ -1,5 +1,5 @@
 /*
-  Copyright (C) 2024 Andrew Dunstan
+  Copyright (C) 2026 Andrew Dunstan
   This file is part of teensy4_usbhost (https://github.com/A-Dunstan/teensy4_usbhost).
 
   teensy4_usbhost is free software: you can redistribute it and/or modify
