@@ -477,9 +477,13 @@ bool asix88772_eth::update_mac_filter() {
     else rx |= 1<<5;                   // receive any unicast frames that match filter
   }
 
-  if (!vendor_command<CMD_WRITE_MULTICAST_FILTER>(filter))
-    return false;
-  dprintf("update_mac_filter setting new rx register: %04X\n", rx);
+  if (!vendor_command<CMD_WRITE_MULTICAST_FILTER>(filter)) {
+    // setting multicast filter failed for some reason so just accept everything?
+    if (rx & (3<<4)) {
+      //dprintf("Failed to set multicast filter, activating promiscuous mode\n");
+      rx = (rx & ~(3<<4))|1;
+    }
+  }
   if (!vendor_command<CMD_WRITE_RX_CONTROL>(rx))
     return false;
 
