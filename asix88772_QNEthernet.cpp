@@ -17,7 +17,6 @@
 */
 
 #include <asix88772_QNEthernet.h>
-#include "asix88772.h"
 
 #ifdef QNETHERNET_EXTERNAL_DRIVER_ASIX88772
 
