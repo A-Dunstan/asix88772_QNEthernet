@@ -241,24 +241,30 @@ err_t output(struct pbuf* const p) {
   return ret;
 }
 
-//#if QNETHERNET_ENABLE_RAW_FRAME_SUPPORT
+#if QNETHERNET_ENABLE_RAW_FRAME_SUPPORT
 bool output_frame(const void* const frame, const size_t len) {
   bool ret = false;
+  if (len <= 65535) {
+    // add a 4 byte header using a buffer that is multiple of the packet size
+    auto p = new(std::nothrow) uint8_t[512];
+    if (p) {
+      p[0] = len;
+      p[1] = len >> 8;
+      p[2] = ~len;
+      p[3] = (~len) >> 8;
+      auto front_len = std::min(len, (size_t)512-4);
+      memcpy(p+4, frame, front_len);
+      ret = asix88772().output_frame(p, front_len+4);
+      if (ret && len > front_len)
+        ret = asix88772().output_frame((const uint8_t*)frame+front_len, len-front_len);
 
-  auto p = new(std::nothrow) uint8_t[len+4];
-  if (p) {
-    p[0] = len;
-    p[1] = len >> 8;
-    p[2] = ~len;
-    p[3] = (~len) >> 8;
-    memcpy(p+4, frame, len);
-    ret = asix88772().output_frame(p, len+4);
-    delete[] p;
+      delete[] p;
+    }
   }
 
   return ret;
 }
-//#endif
+#endif
 
 #if !QNETHERNET_ENABLE_PROMISCUOUS_MODE
 bool set_incoming_mac_address_allowed(const uint8_t mac[ETH_HWADDR_LEN], const bool allow) {
