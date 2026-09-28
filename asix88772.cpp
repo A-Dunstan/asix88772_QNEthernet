@@ -451,7 +451,7 @@ FLASHMEM bool asix88772_eth::init() {
 }
 
 bool asix88772_eth::update_mac_filter() {
-  uint16_t rx = 0x88; // default rx control: start operation + receive broadcast frames
+  uint16_t rx = 0x388; // default rx control: 16KB frame burst + start operation + receive broadcast frames
   uint8_t filter[8] = {0};
 
   auto calc_mask = [](mac_addr& mac)-> uint32_t {
@@ -505,6 +505,7 @@ FLASHMEM bool asix88772_eth::attach(const usb_device_descriptor*, const usb_conf
 
   const uint8_t* end = &cd->bLength + cd->wTotalLength;
   const usb_descriptor* desc = cd;
+  // find the interface descriptor
   do {
     desc = desc->next();
     if (&desc->bLength >= end) return false;
@@ -512,17 +513,21 @@ FLASHMEM bool asix88772_eth::attach(const usb_device_descriptor*, const usb_conf
 
   if (desc) {
     auto id = static_cast<const usb_interface_descriptor*>(desc);
+    // parse endpoints to get status (INT IN), in (BULK IN) and out (BULK OUT)
     for (uint8_t i=0; i < id->bNumEndpoints; i++) {
       auto ep = get_interface_endpoint(id, i);
       if (ep == NULL) return false;
-      if (ep->bmAttributes==USB_ENDPOINT_BULK) {
-        if (ep->bEndpointAddress&0x80) {
-          if (ep_in==0) ep_in = ep->bEndpointAddress;
-        } else if (ep_out==0)
-          ep_out = ep->bEndpointAddress;
-      } else if (ep->bmAttributes==USB_ENDPOINT_INTERRUPT) {
-        if (ep->bEndpointAddress&0x80 && ep->wMaxPacketSize==8 && ep_status==0)
-          ep_status = ep->bEndpointAddress;
+      switch (ep->bmAttributes) {
+        case USB_ENDPOINT_BULK:
+          if (ep->bEndpointAddress&0x80) {
+            if (ep_in==0) ep_in = ep->bEndpointAddress;
+          } else if (ep_out==0)
+            ep_out = ep->bEndpointAddress;
+          break;
+        case USB_ENDPOINT_INTERRUPT:
+          if (ep->bEndpointAddress&0x80 && ep->wMaxPacketSize==8 && ep_status==0)
+            ep_status = ep->bEndpointAddress;
+          break;
       }
 
       if (ep_status && ep_in && ep_out) {
