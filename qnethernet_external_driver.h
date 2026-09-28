@@ -7,3 +7,5 @@
 
 // 4 bytes for frame length + parity, 2 bytes padding
 #define PBUF_LINK_ENCAPSULATION_HLEN    6
+
+#define LWIP_SUPPORT_CUSTOM_PBUF 1

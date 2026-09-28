@@ -25,14 +25,64 @@
 
 #pragma message("Using ASIX88772 QNEthernet Driver")
 
-static asix88772_eth& asix88772(void) {
-  DMAMEM static asix88772_eth asix_device;
-  return asix_device;
-}
-
 namespace qindesign {
 namespace network {
 namespace driver {
+
+static asix88772_eth& asix88772();
+
+class rx_buffer : public pbuf_custom, public asix88772_eth::read_buffer {
+private:
+  class rx_ref : public pbuf_custom {
+  private:
+    rx_buffer& ref;
+
+    static void rx_ref_free(struct pbuf* pb) {
+      delete reinterpret_cast<rx_ref*>(pb);
+    }
+
+    ~rx_ref() {
+      pbuf_free(&ref.pbuf);
+    }
+    rx_ref(rx_buffer& _ref) : ref(_ref) {
+      pbuf_ref(&ref.pbuf);
+      custom_free_function = rx_ref_free;
+    }
+  public:
+    static struct pbuf* create(rx_buffer& ref, uint16_t length) {
+      struct pbuf* p = NULL;
+      auto r = new rx_ref(ref);
+      if (r) {
+        p = pbuf_alloced_custom(PBUF_RAW, length, PBUF_ROM, r, ref.pbuf.payload, ref.pbuf.tot_len);
+        if (p == NULL) delete r;
+      }
+      return p;
+    }
+  };
+
+  static void rx_free(struct pbuf* pb) {
+    reinterpret_cast<rx_buffer*>(pb)->submit();
+  }
+
+public:
+  void submit() {
+    asix88772().submit_read_buffer(*this);
+  }
+
+  rx_buffer() {
+    custom_free_function = rx_free;
+    submit();
+  }
+
+  struct pbuf* get_ref(uint16_t length) {
+    return rx_ref::create(*this, length);
+  }
+};
+
+static asix88772_eth& asix88772() {
+  DMAMEM static asix88772_eth asix_device;
+  return asix_device;
+}
 
 FLASHMEM void get_capabilities(DriverCapabilities* const dc) {
   dc->isMACSettable                = true;
@@ -72,6 +122,7 @@ bool has_hardware() {
 void set_chip_select_pin(const int) {}
 
 bool init() {
+  static rx_buffer rx[asix88772_eth::max_input_buffers()] DMAMEM;
   asix88772().setPHYPower(true);
   return true;
 }
@@ -81,20 +132,72 @@ void deinit() {
 }
 
 struct pbuf* proc_input(struct netif* const netif, const int) {
-//  dprintf("PROC_INPUT\n");
-  struct pbuf* p = NULL;
-  asix88772_eth::read_buffer *buf;
+  static struct pbuf* head = NULL;
+  struct pbuf* ret = NULL;
+
+  struct {
+    uint16_t len;
+    uint16_t nlen;
+    bool valid() { return (len ^ nlen) == 0xFFFF; }
+  } fl = {};
+
   size_t length;
-  if (asix88772().get_read(buf, length)) {
-    if (length) {
-      p = pbuf_alloc(PBUF_RAW, length-4+ETH_PAD_SIZE, PBUF_POOL);
-      if (p) pbuf_take(p, buf->data+4-ETH_PAD_SIZE, p->tot_len);
+  asix88772_eth::read_buffer *buf;
+  while (asix88772().get_read(buf, length)) {
+    auto rx = static_cast<rx_buffer*>(buf);
+    auto p = pbuf_alloced_custom(PBUF_RAW, length, PBUF_POOL, rx, rx->data, sizeof(rx->data));
+    if (head == NULL) head = p;
+    else pbuf_cat(head, p);
+  }
+
+  while (head) {
+    if (pbuf_copy_partial(head, &fl, sizeof(fl), 0) == sizeof(fl)) {
+      if (!fl.valid()) {
+        // desynchronized, eat 2 bytes and retry
+        head = pbuf_free_header(head, 2);
+        continue;
+      }
+
+      uint32_t len = 4 + (fl.len & 0x7FF) + (fl.len&1);
+      if (head->tot_len >= len) {
+        // eat the frame length header
+        head = pbuf_free_header(head, sizeof(fl));
+
+        if (fl.len & 0xF800) {
+          // some sort of error in the frame, discard it
+          head = pbuf_free_header(head, len-4);
+          continue;
+        }
+        // else process it
+        break;
+      }
     }
 
-    asix88772().submit_read_buffer(*buf);
-//    dprintf("proc_input buf %u bytes\n", length-4);
+    // need more data, abort
+    return ret;
   }
-  return p;
+
+  if (head) {
+    uint16_t l = fl.len + (fl.len&1);
+    if (head->len < l ) {
+      // data spans multiple read buffers, coalesce into one
+      // (because lwip is full of functions that assume the entire frame is in one pbuf)
+      ret = pbuf_alloc(PBUF_RAW, fl.len, PBUF_POOL);
+      if (ret) pbuf_copy_partial_pbuf(ret, head, fl.len, 0);
+    } else if (head->len > l) {
+      // head contains the whole packet, but also contains data following
+      // -> use a reference
+      ret = reinterpret_cast<rx_buffer*>(head)->get_ref(fl.len);
+    } else {
+      // head is exactly the right size (maybe has one extra byte that will be ignored
+      ret = head;
+      pbuf_ref(head);
+    }
+
+    head = pbuf_free_header(head, l);
+  }
+
+  return ret;
 }
 
 void poll(struct netif* const netif) {

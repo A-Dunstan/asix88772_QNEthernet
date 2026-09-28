@@ -4,14 +4,25 @@
 #include <teensy4_usbhost.h>
 
 class asix88772_eth : public USB_Driver, public USB_Driver::Factory {
+  enum { MAX_INPUT_BUFFERS = 16 };
 public:
   struct read_buffer {
-    uint8_t data[2048] __attribute__((aligned(32)));
+    uint8_t data[512] __attribute__((aligned(32)));
   };
+  constexpr static size_t max_input_buffers() { return MAX_INPUT_BUFFERS; }
 
 private:
-  std::array<read_buffer, 5> input_buffers;
   uint8_t status[8] __attribute__((aligned(32)));
+
+  struct filled_buf {
+    read_buffer* buf;
+    size_t length;
+  };
+
+  TAtomQueue<read_buffer*, MAX_INPUT_BUFFERS> input_buffers;
+  TAtomQueue<filled_buf, MAX_INPUT_BUFFERS> input_filled;
+  void bulk_in(int, usb_bulkintr_sg*);
+  void rx_pump(usb_bulkintr_sg* sg=NULL);
 
   struct mac_addr {
     uint8_t addr[6];
@@ -62,13 +73,6 @@ private:
   void interrupt(int);
   const USBCallback status_cb = [=](int r) { interrupt(r); };
 
-  struct filled_buf {
-    read_buffer* buf;
-    size_t length;
-  };
-  TAtomQueue<filled_buf, std::tuple_size<decltype(input_buffers)>{}> input_filled;
-  void bulk_in(int, read_buffer*);
-
   bool init();
   bool update_mac_filter();
   bool write_PHY(uint8_t phy_reg, const uint16_t val, bool internal=true);
@@ -92,7 +96,7 @@ public:
   void restart_auto_negotiation();
   void reset_phy();
   bool loop(); // returns state of the link
-  bool submit_read_buffer(read_buffer&);
+  void submit_read_buffer(read_buffer&);
   bool get_read(read_buffer*&, size_t&); // returns a filled buffer
   bool output_frame(const void* frame, size_t len);
   bool getFullDuplex() const;

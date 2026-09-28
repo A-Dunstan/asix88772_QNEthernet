@@ -56,11 +56,6 @@ enum {
 #define MEDIUM_MODE_FD         (1<<1)
 
 enum {
-  EVENT_ATTACH,
-  EVENT_DETACH,
-};
-
-enum {
   OP_INIT =                    1<<0,
   OP_SET_MAC =                 1<<1,
   OP_SET_MULTICAST =           1<<2,
@@ -82,8 +77,10 @@ void asix88772_eth::interrupt(int result) {
   if (result > 2) {
     uint8_t flagsdiff = status[2] ^ last_int;
     if (flagsdiff & 1) {
-      dprintf("Primary PHY link went %s\n", status[2]&1 ? "UP" : "DOWN");
-      pending_ops |= OP_UPDATE_BMSR;
+      // link state changed, set BMSR update after 100ms
+      Timer(100, [=]() {
+        pending_ops |= OP_UPDATE_BMSR;
+      });
     }
     if (flagsdiff & status[2] & 4) {
       dprintf("Bulk Out Frame Length Error\n");
@@ -370,10 +367,8 @@ bool asix88772_eth::set_node_ID() {
 }
 
 FLASHMEM bool asix88772_eth::init() {
-  filled_buf f;
-
-  // empty filled queue
-  while (input_filled.Get(f, -1) == ATOM_OK);
+  if (getDevice() == NULL)
+    return false;
 
   // get chip type
   if (!vendor_command<CMD_READ_SERIAL_STATUS>(&chip_type))
@@ -448,11 +443,6 @@ FLASHMEM bool asix88772_eth::init() {
   // update MAC filter
   if (!update_mac_filter())
     return false;
-
-  // queue all input
-  for (auto& p : input_buffers) {
-    submit_read_buffer(p);
-  }
 
   interrupt(0);
   pending_ops &= ~OP_INIT;
@@ -532,8 +522,9 @@ FLASHMEM bool asix88772_eth::attach(const usb_device_descriptor*, const usb_conf
       }
 
       if (ep_status && ep_in && ep_out) {
-        dprintf("ASIX 88772: INT %02X IN %02X OUT %02X\n", ep_status, ep_in, ep_out);
-        evt.triggerEvent(EVENT_ATTACH);
+        last_int = 0;
+        pending_ops |= OP_ALL;
+        evt.triggerEvent();
         return true;
       }
     }
@@ -543,8 +534,7 @@ FLASHMEM bool asix88772_eth::attach(const usb_device_descriptor*, const usb_conf
 }
 
 FLASHMEM void asix88772_eth::detach(void) {
-  dprintf("ASIX88772 DETACH\n");
-  evt.triggerEvent(EVENT_DETACH);
+  pending_ops = OP_INIT;
 }
 
 FLASHMEM asix88772_eth::asix88772_eth(bool autoNegotiate, bool speed, bool duplex) {
@@ -614,9 +604,8 @@ bool asix88772_eth::clear_FLE() {
 }
 
 bool asix88772_eth::loop() {
-  if (pending_ops & OP_INIT)
+  if (pending_ops & OP_INIT && !init())
     return false;
-
   if (pending_ops & OP_CLEAR_FLE && !clear_FLE())
     return false;
   if (pending_ops & OP_SET_MAC && !set_node_ID())
@@ -629,50 +618,69 @@ bool asix88772_eth::loop() {
     return false;
   if (pending_ops & OP_UPDATE_ANAR && !update_anar())
     return false;
-  auto old_bmsr = bmsr;
   if (pending_ops & OP_UPDATE_BMSR && !update_bmsr())
     return false;
 
+  rx_pump();
 
   return bmsr & BMSR_LINK_STATUS;
 }
 
 void asix88772_eth::Event(EventResponderRef evt) {
-  auto p = (asix88772_eth*)evt.getContext();
-  switch (evt.getStatus()) {
-    case EVENT_ATTACH:
-      p->last_int = 0;
-      p->pending_ops |= OP_ALL;
-      p->init();
-      break;
-    case EVENT_DETACH:
-      p->pending_ops = OP_INIT;
-      break;
-    default:
-      dprintf("Unhandled event code: %d\n", evt.getStatus());
-  }
+  ((asix88772_eth*)evt.getContext())->loop();
 }
 
-void asix88772_eth::bulk_in(int r, struct read_buffer* pbuf) {
-#if 0
-  if (r >= 16) {
-    uint16_t len = (pbuf->data[1] << 8) | pbuf->data[0];
-    uint16_t nlen = (pbuf->data[3] << 8) | pbuf->data[2];
-    dprintf("BULK_IN: %d/%04X bytes, len %04X nlen %04X (%s)\n", r, r-4, len, nlen, len^0xFFFF^nlen ? "BAD" : "OK");
-    dprintf("DST MAC: %02X:%02X:%02X:%02X:%02X:%02X\t", pbuf->data[4], pbuf->data[5], pbuf->data[6], pbuf->data[7], pbuf->data[8], pbuf->data[9]);
-    dprintf("SRC MAC: %02X:%02X:%02X:%02X:%02X:%02X\n", pbuf->data[10], pbuf->data[11], pbuf->data[12], pbuf->data[13], pbuf->data[14], pbuf->data[15]);
+void asix88772_eth::bulk_in(int r, usb_bulkintr_sg* sg) {
+  auto p = sg;
+  while (p->data) {
+    auto buf = (read_buffer*)p->data;
+    int len = r;
+    if (len > 0) {
+      if (len > p->wLength) len = p->wLength;
+      input_filled.Put({buf, (size_t)len}, -1);
+      r -= len;
+    }
+    else input_buffers.Put(buf, -1);
+    ++p;
   }
-#endif
-  filled_buf f = {pbuf, r > 0 ? (size_t)r : 0};
-  input_filled.Put(f, -1);
+
+  // recycle sg if possible
+  rx_pump(sg);
 }
 
-bool asix88772_eth::submit_read_buffer(read_buffer& buf) {
-  int ret = BulkMessage(ep_in, sizeof(buf.data), buf.data, [=, pbuf=&buf](int r) {
-    bulk_in(r, pbuf);
-  });
-//  dprintf("submit_read_buffer %p %d\n", &buf, ret);
-  return ret >= 0;
+void asix88772_eth::rx_pump(usb_bulkintr_sg* sg) {
+  if (getDevice() == NULL) return;
+
+  while (input_buffers.Size() >= 4) {
+    if (sg==NULL) sg = new(std::nothrow) usb_bulkintr_sg[5];
+    if (sg) {
+      // fill scatter-gather list
+      for (size_t i=0; i < 4; i++) {
+        read_buffer *rd;
+        input_buffers.Get(rd, -1);
+        sg[i] = {rd->data, sizeof(rd->data)};
+      }
+
+      int ret = BulkMessage(ep_in, sg, [=](int r){bulk_in(r, sg);});
+      if (ret < 0) {
+        // request failed, put unused buffers back in the free list
+        for (size_t i=0; i < 4; i++) {
+          input_buffers.Put((read_buffer*)sg[i].data, -1);
+        }
+
+        //dprintf("Failed to queue input\n");
+        break;
+      }
+      else sg = NULL;
+    }
+  }
+
+  delete[] sg;
+}
+
+void asix88772_eth::submit_read_buffer(read_buffer& buf) {
+  input_buffers.Put(&buf, -1);
+  rx_pump();
 }
 
 bool asix88772_eth::get_read(read_buffer*& buf, size_t& len) {
