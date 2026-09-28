@@ -34,6 +34,7 @@ private:
   uint16_t bmcr;
   uint16_t bmsr;
   uint16_t anar;
+  uint16_t anlpar;
 
   union {
     struct {
@@ -84,7 +85,7 @@ protected:
   void detach(void) override;
   bool attach(const usb_device_descriptor*, const usb_configuration_descriptor*) override;
 public:
-  asix88772_eth();
+  asix88772_eth(bool autoNegotiate=true, bool speed=true, bool duplex=true);
   bool get_mac(uint8_t* mac);
   bool set_mac(const mac_addr mac);
   bool filter_address(mac_addr mac, bool allow);
@@ -94,6 +95,13 @@ public:
   bool submit_read_buffer(read_buffer&);
   bool get_read(read_buffer*&, size_t&); // returns a filled buffer
   bool output_frame(const void* frame, size_t len);
+  bool getFullDuplex() const;
+  void setFullDuplex(bool);
+  bool get100mbps() const;
+  void set100mbps(bool);
+  bool getAutoNegotiation() const;
+  void setAutoNegotiation(bool);
+  void setPHYPower(bool);
 };
 
 #endif // _USB_ASIX_88772

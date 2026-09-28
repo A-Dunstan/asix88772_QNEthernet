@@ -72,11 +72,12 @@ bool has_hardware() {
 void set_chip_select_pin(const int) {}
 
 bool init() {
-  asix88772();
+  asix88772().setPHYPower(true);
   return true;
 }
 
 void deinit() {
+  asix88772().setPHYPower(false);
 }
 
 struct pbuf* proc_input(struct netif* const netif, const int) {
@@ -97,20 +98,26 @@ struct pbuf* proc_input(struct netif* const netif, const int) {
 }
 
 void poll(struct netif* const netif) {
-//  dprintf("POLL\n");
-  bool up = asix88772().loop();
-  if (netif_is_link_up(netif) != up) {
-    if (up) netif_set_link_up(netif);
+  auto link_up = asix88772().loop();
+  if (link_up != netif_is_link_up(netif)) {
+    if (link_up) netif_set_link_up(netif);
     else netif_set_link_down(netif);
   }
 }
 
 void get_link_info(LinkInfo* const li) {
-  dprintf("GET_LINK_INFO\n");
+  li->speed = asix88772().get100mbps() ? 100 : 10;
+  li->fullNotHalfDuplex = asix88772().getFullDuplex();
+  li->isAutoNegotiation = asix88772().getAutoNegotiation();
 }
 
 bool set_link(const LinkSettings* const ls) {
-  dprintf("SET_LINK\n");
+  if (ls->speed != 10 && ls->speed != 100)
+    return false;
+
+  asix88772().set100mbps(ls->speed == 100);
+  asix88772().setFullDuplex(ls->fullNotHalfDuplex);
+  asix88772().setAutoNegotiation(ls->autoNegotiation);
   return true;
 }
 
@@ -156,8 +163,8 @@ bool set_incoming_mac_address_allowed(const uint8_t mac[ETH_HWADDR_LEN], const b
 }
 #endif
 
-void notify_manual_link_state(const bool) {
-  dprintf("NOTIFY_MANUAL_LINK_STATE\n");
+void notify_manual_link_state(const bool state) {
+  asix88772().setPHYPower(state);
 }
 
 void restart_auto_negotiation() {

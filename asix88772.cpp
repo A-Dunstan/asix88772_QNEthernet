@@ -33,6 +33,7 @@ enum {
 #define BMSR_JABBER_DETECT     (1<<1)
 #define BMSR_EXTENDED_CAP      (1<<0)
 
+// same definitions are used for ANLPAR
 #define ANAR_NP                (1<<15)
 #define ANAR_ACK               (1<<14)
 #define ANAR_RF                (1<<13)
@@ -44,16 +45,6 @@ enum {
 #define ANAR_10_HD             (1<<5)
 #define ANAR_SELECTOR_MASK     0x1F
 
-#define ANLPAR_NP              (1<<15)
-#define ANLPAR_ACK             (1<<14)
-#define ANLPAR_RF              (1<<13)
-#define ANLPAR_PAUSE           (1<<10)
-#define ANLPAR_T4              (1<<9)
-#define ANLPAR_TX_FD           (1<<8)
-#define ANLPAR_TX_HD           (1<<7)
-#define ANLPAR_10_FD           (1<<6)
-#define ANLPAR_10_HD           (1<<5)
-#define ANLPAR_SELECTOR_MASK   0x1F
 
 #define MEDIUM_MODE_SM         (1<<12)
 #define MEDIUM_MODE_SBP        (1<<11)
@@ -286,10 +277,14 @@ bool asix88772_eth::read_PHY(uint8_t phy_reg, uint16_t& val, bool internal) {
 }
 
 bool asix88772_eth::update_medium_mode() {
-  uint16_t m = MEDIUM_MODE_RE|MEDIUM_MODE_TFC|MEDIUM_MODE_RFC|(1<<2);
-  if (bmcr & BMCR_SPEED_SELECTION) m |= MEDIUM_MODE_PS;
-  if (bmcr & BMCR_DUPLEX_MODE) m |= MEDIUM_MODE_FD;
-  dprintf("New Medium Mode: %04X\n", m);
+  uint16_t m = MEDIUM_MODE_SM|MEDIUM_MODE_RE|(1<<2);
+  // support pause
+  if (anar & anlpar & ANAR_PAUSE) m |= MEDIUM_MODE_TFC|MEDIUM_MODE_RFC;
+  // set 100mbps?
+  if (get100mbps()) m |= MEDIUM_MODE_PS;
+  // set full duplex?
+  if (getFullDuplex()) m |= MEDIUM_MODE_FD;
+
   if (vendor_command<CMD_WRITE_MEDIUM>(m)) {
     pending_ops &= ~OP_UPDATE_MEDIUM;
     return true;
@@ -299,14 +294,30 @@ bool asix88772_eth::update_medium_mode() {
 }
 
 bool asix88772_eth::update_anar() {
-  uint16_t new_anar = anar & 0x05FF;
-  bool ret = write_PHY(PHY_REG_ANAR, new_anar);
+  uint16_t old_anar;
+  // update anar settings from bmcr
+  anar |= ANAR_TX_FD|ANAR_TX_HD|ANAR_10_FD|ANAR_10_HD;
+  if ((bmcr & BMCR_SPEED_SELECTION)==0) // disable 100TX?
+    anar &= ~(ANAR_TX_FD|ANAR_TX_HD);
+  if ((bmcr & BMCR_DUPLEX_MODE)==0)      // disable full duplex?
+    anar &= ~(ANAR_TX_FD|ANAR_10_FD);
+
+  bool ret = read_PHY(PHY_REG_ANAR, old_anar);
   if (ret) {
-    pending_ops &= ~OP_UPDATE_ANAR;
-    // restart auto-negotiation
-    bmcr |= BMCR_RESTART_AUTO_NEG;
-    pending_ops |= OP_UPDATE_BMCR;
+    uint16_t new_anar = (anar & 0x05FF) | (old_anar & ~0x05FF);
+    ret = write_PHY(PHY_REG_ANAR, new_anar);
+    if (ret) {
+      pending_ops &= ~OP_UPDATE_ANAR;
+      // if new settings were written restart auto-negotiation
+      if ((anar ^ old_anar) & 0x05FF) {
+        bmcr |= BMCR_RESTART_AUTO_NEG;
+        update_bmcr();
+      }
+    }
+
+    anar = new_anar;
   }
+
   return ret;
 }
 
@@ -317,18 +328,34 @@ bool asix88772_eth::update_bmcr() {
     if (bmcr & BMCR_RESET) {
       // will need to update BMCR again - it ignores all other bits when RESET is set
       bmcr &= ~BMCR_RESET;
-      pending_ops |= OP_UPDATE_BMSR|OP_UPDATE_ANAR|OP_UPDATE_BMCR;
+      pending_ops |= OP_UPDATE_BMCR|OP_UPDATE_BMSR|OP_UPDATE_ANAR;
     }
-    else // else remove other self-clearing bits
+    else {// else remove other self-clearing bits and update medium
       bmcr &= ~BMCR_RESTART_AUTO_NEG;
+      update_bmsr();
+    }
   }
   return ret;
 }
 
 bool asix88772_eth::update_bmsr() {
+  auto old_bmsr = bmsr;
   bool ret = read_PHY(PHY_REG_BMSR, bmsr);
   if (ret) {
     pending_ops &= ~OP_UPDATE_BMSR;
+    if (bmsr & BMSR_AUTO_NEG_COMPLETE) {
+      read_PHY(PHY_REG_ANLPAR, anlpar);
+    } else {
+      anlpar = 0;
+      // auto-negotiation may still be in progress
+      if ((bmcr & BMCR_AUTO_NEGOTIATE) && (old_bmsr & BMSR_LINK_STATUS)==0 && (bmsr & BMSR_LINK_STATUS)) {
+        // yes, read BMSR again after 200ms
+        Timer(200, [=]() {
+          pending_ops |= OP_UPDATE_BMSR;
+        });
+      }
+    }
+    update_medium_mode();
   }
   return ret;
 }
@@ -380,10 +407,6 @@ FLASHMEM bool asix88772_eth::init() {
     return false;
    delay(150);
 
-  // set medium mode
-  if (!update_medium_mode())
-    return false;
-
   // write IPG/IPG1/IPG2
   if (!vendor_command<CMD_WRITE_IPG>(0x15,0x0C,0x12))
     return false;
@@ -414,7 +437,11 @@ FLASHMEM bool asix88772_eth::init() {
     return false;
   dprintf("PHY capabilities: %04X\n", bmsr);
 
-  // disable monitor
+  // set medium mode (interrupt polling won't work if RX path is not enabled)
+  if (!update_medium_mode())
+    return false;
+
+  // disable Wake-on-LAN monitor
   if (!vendor_command<CMD_WRITE_MONITOR>(0))
     return false;
 
@@ -520,7 +547,7 @@ FLASHMEM void asix88772_eth::detach(void) {
   evt.triggerEvent(EVENT_DETACH);
 }
 
-FLASHMEM asix88772_eth::asix88772_eth() {
+FLASHMEM asix88772_eth::asix88772_eth(bool autoNegotiate, bool speed, bool duplex) {
   auto mac1 = HW_OCOTP_MAC1;
   auto mac0 = HW_OCOTP_MAC0;
   asix_mac.addr[0] = mac1 >> 8;
@@ -530,11 +557,14 @@ FLASHMEM asix88772_eth::asix88772_eth() {
   asix_mac.addr[4] = mac0 >> 8;
   asix_mac.addr[5] = mac0 >> 0;
 
-  bmcr = BMCR_SPEED_SELECTION|BMCR_AUTO_NEGOTIATE|BMCR_DUPLEX_MODE;
+  bmcr = 0;
   bmsr = 0;
-  anar = ANAR_PAUSE|ANAR_TX_FD|ANAR_TX_HD|ANAR_10_FD|ANAR_10_HD|(1 & ANAR_SELECTOR_MASK);
+  anar = ANAR_PAUSE|(1 & ANAR_SELECTOR_MASK);
   pending_ops = OP_ALL;
 
+  set100mbps(speed);
+  setFullDuplex(duplex);
+  setAutoNegotiation(autoNegotiate);
   evt.setContext(this);
   evt.attach(Event);
 }
@@ -573,16 +603,6 @@ bool asix88772_eth::filter_address(const mac_addr mac, const bool allow) {
   return true;
 }
 
-void asix88772_eth::restart_auto_negotiation() {
-  bmcr |= BMCR_RESTART_AUTO_NEG;
-  pending_ops |= OP_UPDATE_BMCR;
-}
-
-void asix88772_eth::reset_phy() {
-  bmcr |= BMCR_RESET;
-  pending_ops |= OP_UPDATE_BMCR|OP_UPDATE_BMSR|OP_UPDATE_ANAR;
-}
-
 bool asix88772_eth::clear_FLE() {
   if (!vendor_command<CMD_WRITE_SOFTWARE_RESET>(0x2B))
     return false;
@@ -613,13 +633,6 @@ bool asix88772_eth::loop() {
   if (pending_ops & OP_UPDATE_BMSR && !update_bmsr())
     return false;
 
-  if (!(old_bmsr & BMSR_LINK_STATUS) && (bmsr & BMSR_LINK_STATUS)) {
-    uint16_t anlpar;
-    if (read_PHY(PHY_REG_ANLPAR, anlpar)) {
-      dprintf("BMSR: %04X, ANLPAR: %04X\n", bmsr, anlpar);
-    } else
-      dprintf("Failed to read ANLPAR\n");
-  }
 
   return bmsr & BMSR_LINK_STATUS;
 }
@@ -675,4 +688,48 @@ bool asix88772_eth::get_read(read_buffer*& buf, size_t& len) {
 bool asix88772_eth::output_frame(const void* frame, size_t len) {
   int ret = BulkMessage(ep_out, len, frame);
   return (ret >= 0 && (size_t)ret >= len);
+void asix88772_eth::restart_auto_negotiation() {
+  bmcr |= BMCR_RESTART_AUTO_NEG;
+  pending_ops |= OP_UPDATE_BMCR;
+}
+
+void asix88772_eth::reset_phy() {
+  bmcr |= BMCR_RESET;
+  pending_ops |= OP_UPDATE_BMCR;
+}
+
+bool asix88772_eth::getFullDuplex() const {
+  if ((bmsr & BMSR_AUTO_NEG_COMPLETE)==0)
+    return bmcr & BMCR_DUPLEX_MODE;
+  return anar & anlpar & (ANAR_TX_FD|ANAR_10_FD);
+}
+
+void asix88772_eth::setFullDuplex(bool duplex) {
+  bmcr = (bmcr & ~BMCR_DUPLEX_MODE) | (duplex ? BMCR_DUPLEX_MODE : 0);
+  pending_ops |= OP_UPDATE_BMCR|OP_UPDATE_ANAR;
+}
+
+bool asix88772_eth::get100mbps() const {
+  if ((bmsr & BMSR_AUTO_NEG_COMPLETE)==0)
+    return bmcr & BMCR_SPEED_SELECTION;
+  return anar & anlpar & (ANAR_TX_FD|ANAR_TX_HD);
+}
+
+void asix88772_eth::set100mbps(bool speed) {
+  bmcr = (bmcr & ~BMCR_SPEED_SELECTION) | (speed ? BMCR_SPEED_SELECTION : 0);
+  pending_ops |= OP_UPDATE_BMCR|OP_UPDATE_ANAR;
+}
+
+bool asix88772_eth::getAutoNegotiation() const {
+  return bmcr & BMCR_AUTO_NEGOTIATE;
+}
+
+void asix88772_eth::setAutoNegotiation(bool auto_neg) {
+  bmcr = (bmcr & ~BMCR_AUTO_NEGOTIATE) | (auto_neg ? BMCR_AUTO_NEGOTIATE : 0);
+  pending_ops |= OP_UPDATE_BMCR;
+}
+
+void asix88772_eth::setPHYPower(bool on) {
+  bmcr = (bmcr & ~BMCR_POWER_DOWN) | (on ? 0 : BMCR_POWER_DOWN);
+  pending_ops |= OP_UPDATE_BMCR;
 }
