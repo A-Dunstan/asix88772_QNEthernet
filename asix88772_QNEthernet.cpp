@@ -119,7 +119,7 @@ bool has_hardware() {
 void set_chip_select_pin(const int) {}
 
 bool init() {
-  static rx_buffer rx[asix88772_eth::max_input_buffers()] DMAMEM;
+  DMAMEM static rx_buffer rx[asix88772_eth::max_input_buffers()];
   asix88772().setPHYPower(true);
   return true;
 }
@@ -186,12 +186,14 @@ struct pbuf* proc_input(struct netif* const netif, const int) {
       // -> use a reference
       ret = reinterpret_cast<rx_buffer*>(head)->get_ref(fl.len);
     } else {
-      // head is exactly the right size (maybe has one extra byte that will be ignored
+      // head is exactly the right size (maybe has one extra byte that will be ignored)
       ret = head;
       pbuf_ref(head);
     }
 
     head = pbuf_free_header(head, l);
+    // pbuf_free_header doesn't fix tot_len...
+    if (ret && ret->next == NULL) ret->tot_len = ret->len;
   }
 
   return ret;
